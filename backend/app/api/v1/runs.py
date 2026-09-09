@@ -6,6 +6,7 @@ import re
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from sse_starlette.sse import EventSourceResponse
+from pydantic import BaseModel, Field
 
 from backend.app.dependencies import get_database, get_event_stream, get_run_service
 from backend.app.schemas import ClarificationSubmit, RunControl
@@ -17,6 +18,79 @@ from deepresearch_agent.persistence.repositories import (
 from deepresearch_agent.context import ArtifactEditContextBuilder
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+class CommandSubmit(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    content: str | None = Field(default=None, max_length=20000)
+    command: dict | None = None
+    preview_only: bool = False
+    base_revision: int | None = None
+    base_checkpoint_version: int | None = None
+
+
+class CommandApply(BaseModel):
+    preview_hash: str | None = None
+
+
+@router.get("/{run_id}/edit-state")
+async def get_edit_state(run_id: str, database=Depends(get_database)):
+    from sqlalchemy import select
+    from deepresearch_agent.persistence.models import RunEditModel
+    await require_run(database, run_id)
+    checkpoint = await CheckpointRepository(database).latest(run_id)
+    async with database.sessions() as session:
+        row = (await session.execute(select(RunEditModel).where(RunEditModel.run_id == run_id)
+            .order_by(RunEditModel.created_at.desc()).limit(1))).scalar_one_or_none()
+    return {"plan": None if not checkpoint else json.loads(checkpoint.state_json).get("workflow_state", {}).get("state", {}).get("plan"),
+        "command": None if not row else {"request_id": row.request_id, "status": row.status, **json.loads(row.result_json)}}
+
+
+@router.post("/{run_id}/commands", status_code=202)
+async def submit_command(run_id: str, payload: CommandSubmit, run_service=Depends(get_run_service)):
+    return await run_service.commands.submit(run_id, payload.request_id, payload.model_dump(exclude={"request_id"}, exclude_none=True))
+
+
+@router.get("/{run_id}/commands/{request_id}")
+async def get_command(run_id: str, request_id: str, run_service=Depends(get_run_service)):
+    return await run_service.commands.get(run_id, request_id)
+
+
+@router.post("/{run_id}/commands/{request_id}/apply")
+async def apply_command(run_id: str, request_id: str, payload: CommandApply, run_service=Depends(get_run_service)):
+    return await run_service.commands.apply(run_id, request_id, payload.preview_hash)
+
+
+@router.post("/{run_id}/commands/{request_id}/cancel")
+async def cancel_command(run_id: str, request_id: str, run_service=Depends(get_run_service)):
+    return await run_service.commands.cancel(run_id, request_id)
+
+
+@router.post("/{run_id}/commands/{request_id}/clarifications")
+async def clarify_command(run_id: str, request_id: str, payload: ClarificationSubmit, run_service=Depends(get_run_service)):
+    return await run_service.commands.clarify(run_id, request_id, payload.content)
+
+
+@router.get("/{run_id}/revisions/{revision}")
+async def get_revision(run_id: str, revision: int, database=Depends(get_database)):
+    from deepresearch_agent.persistence.models import RunRevisionModel
+    async with database.sessions() as session:
+        row = await session.get(RunRevisionModel, (run_id, revision))
+        if not row:
+            raise AppError(ErrorCode.NOT_FOUND, "修订版本不存在")
+        return {"revision": revision, "snapshot": json.loads(row.snapshot_json), "impact": json.loads(row.impact_json)}
+
+
+@router.get("/{run_id}/revisions")
+async def get_revisions(run_id: str, database=Depends(get_database)):
+    from sqlalchemy import select
+    from deepresearch_agent.persistence.models import RunRevisionModel
+    await require_run(database, run_id)
+    async with database.sessions() as session:
+        rows = (await session.execute(select(RunRevisionModel).where(RunRevisionModel.run_id == run_id)
+            .order_by(RunRevisionModel.revision))).scalars()
+        return {"items": [{"revision": r.revision, "impact": json.loads(r.impact_json),
+            "plan": json.loads(r.snapshot_json).get("workflow_state", {}).get("state", {}).get("plan")} for r in rows]}
 
 _EVIDENCE_ANNEX = re.compile(r"(?ms)^##\s+全量证据索引\s*.*$")
 

@@ -13,6 +13,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  editState: (id: string) => request<import("../components/PausedRunEditor").EditState>(`/runs/${id}/edit-state`),
+  editCommand: (id: string, payload: Record<string, unknown>) => request(`/runs/${id}/commands`, {method: "POST", body: JSON.stringify(payload)}),
+  applyEdit: (id: string, commandId: string, previewHash?: string) => request(`/runs/${id}/commands/${commandId}/apply`, {method: "POST", body: JSON.stringify({preview_hash: previewHash})}),
+  cancelEdit: (id: string, commandId: string) => request(`/runs/${id}/commands/${commandId}/cancel`, {method: "POST"}),
+  clarifyEdit: (id: string, commandId: string, content: string) => request(`/runs/${id}/commands/${commandId}/clarifications`, {method: "POST", body: JSON.stringify({content})}),
   capabilities: () => request<Capabilities>("/capabilities"),
   health: () => request<{status: string; checked_at: string; components: Record<string, {status: string; configured?: boolean; reason?: string | null; check_level?: string}>}>("/health"),
   cacheStats: () => request<CacheStats>("/cache/stats"),
@@ -22,7 +27,7 @@ export const api = {
   createSession: (title = "新对话") => request<Session>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
   patchSession: (id: string, payload: {title?: string; status?: string}) => request<Session>(`/sessions/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteSession: (id: string) => request<void>(`/sessions/${id}`, { method: "DELETE" }),
-  send: (sessionId: string, payload: {client_message_id: string; content: string; source_mode: SourceMode; workflow_mode: WorkflowMode}) =>
+  send: (sessionId: string, payload: {client_message_id: string; content: string; source_mode: SourceMode; workflow_mode: WorkflowMode; target_run_id?: string}) =>
     request<{message_id: string; run_id: string; status: string; events_url: string}>(`/sessions/${sessionId}/messages`, { method: "POST", body: JSON.stringify(payload) }),
   run: (id: string) => request<Run>(`/runs/${id}`),
   cancel: (id: string) => request(`/runs/${id}/cancel`, { method: "POST" }),

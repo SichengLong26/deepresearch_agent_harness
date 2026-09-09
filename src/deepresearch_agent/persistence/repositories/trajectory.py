@@ -6,13 +6,13 @@ import hashlib
 import json
 from typing import Any, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, update, text
 
 from deepresearch_agent.harness.contracts import ContractCheckData, EvidenceData
 from deepresearch_agent.harness.versioning import CHECKPOINT_SCHEMA_VERSION
 from deepresearch_agent.persistence.artifact_store import StoredArtifact
 from deepresearch_agent.persistence.database import Database
-from deepresearch_agent.persistence.models import ArtifactModel, CheckpointModel, ContractCheckModel, EvidenceModel, PlanModel, TaskModel, ToolCallModel
+from deepresearch_agent.persistence.models import ArtifactModel, CheckpointModel, ContractCheckModel, EvidenceModel, PlanModel, TaskModel, ToolCallModel, RunModel
 
 from .utils import json_text, new_id, utc_now_iso
 
@@ -70,16 +70,67 @@ class CheckpointRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    async def save(self, run_id: str, stage: str, state: dict[str, Any]) -> CheckpointModel:
+    async def save(self, run_id: str, stage: str, state: dict[str, Any], *, lease_owner: str | None = None) -> CheckpointModel:
         state_payload = {"schema_version": CHECKPOINT_SCHEMA_VERSION, **state}
-        serialized = json_text(state_payload)
-        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         async with self.database.transaction() as session:
+            if lease_owner is not None:
+                await session.execute(text("BEGIN IMMEDIATE"))
+                run = await session.get(RunModel, run_id)
+                if not run or run.lease_owner != lease_owner or run.cancellation_requested:
+                    from deepresearch_agent.harness.errors import LostExecutionLease
+                    raise LostExecutionLease("执行权已失效，拒绝迟到任务检查点")
+            if stage == "task_boundary":
+                await self._commit_task_projection(session, run_id, state_payload)
+            serialized = json_text(state_payload)
+            digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
             current = (await session.execute(select(func.max(CheckpointModel.version)).where(CheckpointModel.run_id == run_id))).scalar_one()
             model = CheckpointModel(checkpoint_id=new_id("chk"), run_id=run_id, version=(current or 0) + 1, stage=stage, state_json=serialized, state_hash=digest, schema_version=CHECKPOINT_SCHEMA_VERSION, created_at=utc_now_iso())
             session.add(model)
             await session.flush()
             return model
+
+    async def _commit_task_projection(self, session, run_id, snapshot):
+        """Commit results and the resumable state together; old snapshots retain history."""
+        from deepresearch_agent.agents.multi_agent.core.retrieval_result import RetrievalResult
+        from deepresearch_agent.harness.evidence import EvidenceLedger
+        workflow = snapshot.get("workflow_state", {}).get("state", {})
+        plan = workflow.get("plan")
+        if not plan:
+            return
+        projection = await session.get(PlanModel, plan["plan_id"])
+        if projection:
+            projection.plan_json = json_text(plan)
+            projection.status = plan["status"]
+            projection.updated_at = utc_now_iso()
+        for task in plan["task_graph"]["nodes"]:
+            model = await session.get(TaskModel, task["task_id"])
+            if model:
+                model.task_json, model.status = json_text(task), task["status"]
+                model.updated_at = utc_now_iso()
+        usage = snapshot.setdefault("budget_usage", {})
+        for record in workflow.get("execution_records", []):
+            for call in record.get("tool_calls", []):
+                if await session.get(ToolCallModel, call["tool_call_id"]) is None:
+                    session.add(ToolCallModel(tool_call_id=call["tool_call_id"], run_id=run_id,
+                        task_id=record["task_id"], tool_name=call["tool_name"], source_mode=snapshot["source_mode"],
+                        status="failed" if call.get("status") == "failed" else "completed",
+                        args_json=json_text(call.get("args", {})), result_json=json_text(call.get("result")),
+                        created_at=utc_now_iso(), completed_at=utc_now_iso()))
+                    usage["tool_calls"] = usage.get("tool_calls", 0) + 1
+                    if snapshot["source_mode"] == "web":
+                        usage["tavily_calls"] = usage.get("tavily_calls", 0) + 1
+            for raw in record.get("evidence", []):
+                result = RetrievalResult.from_dict(raw)
+                calls = record.get("tool_calls", [])
+                _result, data = EvidenceLedger().assign(run_id=run_id, task_id=record["task_id"],
+                    tool_call_id=calls[0]["tool_call_id"] if calls else None,
+                    provider=calls[0]["tool_name"] if calls else "unknown", results=[result])[0]
+                if await session.get(EvidenceModel, data.evidence_id) is None:
+                    session.add(EvidenceModel(**data.model_dump(exclude={"source_mode"}), source_mode=data.source_mode.value,
+                        metadata_json=json_text(result.metadata.model_dump(mode="json")), created_at=utc_now_iso()))
+        run = await session.get(RunModel, run_id)
+        if run:
+            run.usage_json = json_text(usage)
 
     async def latest(self, run_id: str) -> Optional[CheckpointModel]:
         async with self.database.sessions() as session:
@@ -105,7 +156,23 @@ class EvidenceRepository:
 
     async def list_for_run(self, run_id: str) -> list[EvidenceModel]:
         async with self.database.sessions() as session:
-            return list((await session.execute(select(EvidenceModel).where(EvidenceModel.run_id == run_id, EvidenceModel.invalidated_at.is_(None)).order_by(EvidenceModel.created_at))).scalars())
+            rows = list((await session.execute(select(EvidenceModel).where(EvidenceModel.run_id == run_id, EvidenceModel.invalidated_at.is_(None)).order_by(EvidenceModel.created_at))).scalars())
+            run = await session.get(RunModel, run_id)
+            if not run or not json.loads(run.config_snapshot_json).get("active_revision"):
+                return rows
+            checkpoint = (await session.execute(select(CheckpointModel).where(CheckpointModel.run_id == run_id)
+                .order_by(CheckpointModel.version.desc()).limit(1))).scalar_one_or_none()
+            if not checkpoint or not CheckpointRepository.verify(checkpoint):
+                return []
+            state = json.loads(checkpoint.state_json).get("workflow_state", {}).get("state", {})
+            active_ids = set()
+            for record in state.get("execution_records", []):
+                for evidence in record.get("evidence", []):
+                    metadata = evidence.get("metadata", {})
+                    digest = metadata.get("content_hash") or hashlib.sha256(str(evidence.get("evidence", "")).encode()).hexdigest()
+                    identity = f"{run_id}:{evidence.get('source_mode', run.source_mode)}:{metadata.get('source_id')}:{digest}"
+                    active_ids.add("ev_" + hashlib.sha256(identity.encode()).hexdigest()[:24])
+            return [row for row in rows if row.evidence_id in active_ids]
 
 
 class ContractRepository:

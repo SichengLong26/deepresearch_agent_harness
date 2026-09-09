@@ -21,6 +21,9 @@ class RunContext(BaseModel):
     resolved_query: Optional[str] = None
     plan_version: int = 0
     checkpoint_version: int = 0
+    resume_cursor: Optional[RunStatus] = None
+    charged_record_tokens: Dict[str, int] = Field(default_factory=dict)
+    execution_owner: Optional[str] = None
     config_snapshot: Dict[str, Any] = Field(default_factory=dict)
     model_snapshot: Dict[str, Any] = Field(default_factory=dict)
     budget_limits: BudgetLimits = Field(default_factory=BudgetLimits)

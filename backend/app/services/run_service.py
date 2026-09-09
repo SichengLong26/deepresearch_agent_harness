@@ -53,6 +53,8 @@ class RunService:
         self._external_factory = workflow_factory
         self._router = None if workflow_factory else create_default_router()
         self._tasks: dict[str, asyncio.Task] = {}
+        from backend.app.services.run_command_service import RunCommandService
+        self.commands = RunCommandService(self)
         memory_repository = MemoryRepository(database)
         memory_service = MemoryService(
             memory_repository, AuditRepository(database),
@@ -234,12 +236,14 @@ class RunService:
         for run_id in run_ids:
             self.schedule(run_id)
         await self.skill_learning.recover()
+        await self.commands.recover()
         return run_ids
 
     async def cancel(self, run_id: str) -> bool:
         requested = await self.runs.request_cancel(run_id)
         if not requested:
             return False
+        await self.commands.cancel_all(run_id)
         mark_run_cancelled(run_id)
         task = self._tasks.get(run_id)
         if task is not None and not task.done():
@@ -272,6 +276,8 @@ class RunService:
         return True
 
     async def resume(self, run_id: str, *, clarification: str | None = None) -> bool:
+        if await self.commands.pending(run_id):
+            return False
         before = await self.runs.get(run_id)
         pending_pause = bool(
             before and json.loads(before.config_snapshot_json or "{}").get("pause_requested")
@@ -302,6 +308,9 @@ class RunService:
         return resumed
 
     async def shutdown(self) -> None:
+        for task in self.commands.workers.values():
+            task.cancel()
+        await asyncio.gather(*self.commands.workers.values(), return_exceptions=True)
         await self.skill_learning.shutdown()
         active = list(self._tasks.values())
         if not active:

@@ -8,6 +8,26 @@ class Base(DeclarativeBase):
     pass
 
 
+class RunEditModel(Base):
+    __tablename__ = "run_edit_requests"
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class RunRevisionModel(Base):
+    __tablename__ = "run_revisions"
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str | None] = mapped_column(String(128))
+    snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    impact_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
 class SessionModel(Base):
     __tablename__ = "sessions"
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)

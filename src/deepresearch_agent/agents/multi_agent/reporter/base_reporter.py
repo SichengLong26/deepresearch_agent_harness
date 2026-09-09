@@ -232,7 +232,7 @@ class BaseReporter:
             plan_summary = self._build_plan_summary(plan)
             evidence_summary = self._build_card_outline_summary(evidence_cards)
             outline = self._outline_builder.build_outline(
-                query=plan.problem_statement.original_query,
+                query=state.context_snapshot.get("report_revision_instructions") or plan.problem_statement.original_query,
                 plan_summary=plan_summary,
                 evidence_summary=evidence_summary,
                 evidence_count=len(evidence_map),

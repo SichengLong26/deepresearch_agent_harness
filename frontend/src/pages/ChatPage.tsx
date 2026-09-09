@@ -8,6 +8,7 @@ import { ClarificationCard } from "../components/ClarificationCard";
 import { ErrorState } from "../components/ErrorState";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
 import { FloatingComposer } from "../components/FloatingComposer";
+import { PausedRunEditor } from "../components/PausedRunEditor";
 import { MessageStrip } from "../components/MessageStrip";
 import { SourceSelector } from "../components/SourceSelector";
 import { WhiteboardDrawer } from "../components/WhiteboardDrawer";
@@ -215,7 +216,7 @@ export function ChatPage({ sessionId }: {sessionId?: string}) {
     if (!sessionId || !text.trim() || sending || (!sourceAvailable && !resumable) || (run && !TERMINAL.includes(run.status) && !resumable)) return;
     setSending(true); setError(null);
     try {
-      const result = await api.send(sessionId, { client_message_id: crypto.randomUUID(), content: text.trim(), source_mode: source, workflow_mode: workflow });
+      const result = await api.send(sessionId, { client_message_id: crypto.randomUUID(), content: text.trim(), source_mode: source, workflow_mode: workflow, ...(resumable && runId ? {target_run_id: runId} : {}) });
       const sameRun = result.run_id === runId;
       setText(""); setRunId(result.run_id);
       if (sameRun) restart();
@@ -343,6 +344,7 @@ export function ChatPage({ sessionId }: {sessionId?: string}) {
     </div>
 
     <ErrorState error={error} />
+    {run && ["paused", "pausing"].includes(run.status) && run.workflow_mode === "plan_execute_report" && <PausedRunEditor runId={run.run_id} onChanged={() => {restart(); void refresh();}} onError={setError} />}
     <AnimatePresence mode="wait" initial={false}>
       {composerCollapsed ? (
         <FloatingComposer key="fab" onClick={() => setComposerCollapsed(false)} />

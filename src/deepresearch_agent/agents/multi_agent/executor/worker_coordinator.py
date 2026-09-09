@@ -87,6 +87,10 @@ class WorkerCoordinator:
         progress_callback: Optional[Callable[[str, TaskNode, Optional[ExecutionRecord]], None]] = None,
     ) -> List[ExecutionRecord]:
         """根据计划信号执行所有任务，返回执行记录列表。"""
+        state.execution_records = [r if isinstance(r, ExecutionRecord) else ExecutionRecord.model_validate(r)
+                                   for r in state.execution_records]
+        state.execution_records = [r if isinstance(r, ExecutionRecord) else ExecutionRecord.model_validate(r)
+                                   for r in state.execution_records]
         task_map = self._prepare_tasks(signal)
 
         if state.plan is not None:
@@ -95,7 +99,7 @@ class WorkerCoordinator:
         effective_mode = self._resolve_execution_mode(signal.execution_mode)
         if effective_mode == "parallel":
             results = self._execute_parallel(
-                state, signal, task_map, progress_callback=progress_callback,
+                state, signal, task_map, stop_predicate=stop_predicate, progress_callback=progress_callback,
             )
         else:
             results = self._execute_sequential(
@@ -105,7 +109,7 @@ class WorkerCoordinator:
 
         if state.plan is not None:
             node_status = [node.status for node in state.plan.task_graph.nodes]
-            if node_status and all(status == "completed" for status in node_status):
+            if node_status and all(status in {"completed", "skipped"} for status in node_status):
                 state.plan.status = "completed"
             elif any(status == "failed" for status in node_status):
                 state.plan.status = "failed"
@@ -166,18 +170,23 @@ class WorkerCoordinator:
             if task is None:
                 _LOGGER.warning("计划信号中包含未知任务: %s", task_id)
                 continue
+            if task.status in {"completed", "skipped", "blocked"}:
+                continue
             if progress_callback is not None:
                 progress_callback("task.started", task, None)
             start_index = len(results)
-            self._execute_single_task(
-                state=state,
+            _success, _reason, isolated_state, isolated_records = self._execute_isolated_task(
+                shared_state=state,
                 signal=signal,
                 task=task,
                 task_map=task_map,
-                results=results,
-                skip_dependency_check=False,
             )
+            self._merge_isolated_state(shared_state=state, isolated_state=isolated_state,
+                task_id=task.task_id, records=isolated_records)
+            results.extend(isolated_records)
             if progress_callback is not None:
+                known = {record.record_id for record in state.execution_records}
+                state.execution_records.extend(record for record in results[start_index:] if record.record_id not in known)
                 for record in results[start_index:]:
                     progress_callback("task.completed", task, record)
         return results
@@ -188,6 +197,7 @@ class WorkerCoordinator:
         signal: PlanExecutionSignal,
         task_map: Dict[str, TaskNode],
         *,
+        stop_predicate: Optional[Callable[[], bool]] = None,
         progress_callback: Optional[Callable[[str, TaskNode, Optional[ExecutionRecord]], None]] = None,
     ) -> List[ExecutionRecord]:
         results: List[ExecutionRecord] = []
@@ -196,7 +206,7 @@ class WorkerCoordinator:
         for task_id in missing:
             _LOGGER.warning("计划信号中包含未知任务: %s", task_id)
 
-        pending: List[str] = [task_id for task_id in sequence if task_id in task_map]
+        pending: List[str] = [task_id for task_id in sequence if task_id in task_map and task_map[task_id].status not in {"completed", "skipped", "blocked"}]
         if not pending:
             return results
 
@@ -208,8 +218,13 @@ class WorkerCoordinator:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             while pending or inflight:
                 scheduled_this_round = False
+                stopping = stop_predicate is not None and stop_predicate()
+                if stopping and not inflight:
+                    break
 
                 for task_id in list(pending):
+                    if stopping or (stop_predicate is not None and stop_predicate()):
+                        break
                     if len(inflight) >= max_workers:
                         break
 
@@ -225,7 +240,7 @@ class WorkerCoordinator:
                             progress_callback("task.started", task, None)
                         future = executor.submit(
                             self._execute_isolated_task,
-                            shared_state=state,
+                            shared_state=state.model_copy(deep=True),
                             signal=signal,
                             task=task,
                             task_map=task_map,
@@ -327,6 +342,24 @@ class WorkerCoordinator:
     ) -> Tuple[bool, Optional[str], PlanExecuteState, List[ExecutionRecord]]:
         """Execute one worker against a deep state snapshot, never shared state."""
         isolated_state = shared_state.model_copy(deep=True)
+        # A task consumes only declared transitive dependencies and its own retry
+        # state. This makes the DAG a real data dependency, not just an ordering hint.
+        permitted = {task.task_id}
+        queue = list(task.depends_on)
+        while queue:
+            dep = queue.pop()
+            if dep not in permitted:
+                permitted.add(dep)
+                if dep in task_map:
+                    queue.extend(task_map[dep].depends_on)
+        isolated_state.execution_records = [r for r in isolated_state.execution_records if r.task_id in permitted]
+        ctx = isolated_state.execution_context
+        if ctx is not None:
+            ctx.completed_task_ids = [key for key in ctx.completed_task_ids if key in permitted]
+            for name in ("retrieval_cache", "intermediate_results", "reflection_retry_counts"):
+                setattr(ctx, name, {key: value for key, value in getattr(ctx, name).items() if key in permitted})
+            ctx.tool_call_history = [v for v in ctx.tool_call_history if v.get("task_id") in permitted]
+            ctx.evidence_registry = {}
         isolated_results: List[ExecutionRecord] = []
         success, reason = self._execute_single_task(
             state=isolated_state,
@@ -334,7 +367,7 @@ class WorkerCoordinator:
             task=task.model_copy(deep=True),
             task_map={key: value.model_copy(deep=True) for key, value in task_map.items()},
             results=isolated_results,
-            skip_dependency_check=True,
+            skip_dependency_check=False,
         )
         return success, reason, isolated_state, isolated_results
 

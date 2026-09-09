@@ -13,7 +13,7 @@ from deepresearch_agent.harness.checkpoints import CheckpointManager
 from deepresearch_agent.harness.contracts import ContractEvaluator, RunStatus, SourceMode, WorkflowMode
 from deepresearch_agent.harness.evidence import EvidenceLedger
 from deepresearch_agent.harness.event_bus import EventBus
-from deepresearch_agent.harness.errors import RunCancelled
+from deepresearch_agent.harness.errors import RunCancelled, LostExecutionLease
 from deepresearch_agent.harness.recovery import classify_exception, classify_verification_failures
 from deepresearch_agent.harness.run_context import RunContext
 from deepresearch_agent.harness.state_machine import StateMachine
@@ -92,6 +92,7 @@ class HarnessRuntime:
         set_current_run(run_id)
         try:
             context = await self._load_context(run_id)
+            context.execution_owner = owner
             if context.status in {RunStatus.INTERRUPTED, RunStatus.PAUSED}:
                 resume_target = context.resume_from_status or RunStatus.QUEUED
                 context.resume_from_status = None
@@ -138,6 +139,26 @@ class HarnessRuntime:
                 })
                 await self._transition(context, RunStatus.PLANNING)
             budget = BudgetManager(context.budget_limits, context.budget_usage)
+            async def task_boundary():
+                self._record_execution_usage(context, driver, budget)
+                context.workflow_state = driver.snapshot()
+                context.resume_cursor = RunStatus.EXECUTING
+                checkpoint = await self.checkpoints.repository.save(context.run_id, "task_boundary",
+                    context.model_dump(mode="json"), lease_owner=owner)
+                context.checkpoint_version = checkpoint.version
+                committed_usage = json.loads(checkpoint.state_json).get("budget_usage", {})
+                budget.usage.tool_calls = committed_usage.get("tool_calls", budget.usage.tool_calls)
+                budget.usage.tavily_calls = committed_usage.get("tavily_calls", budget.usage.tavily_calls)
+                budget.assert_available()
+
+            async def should_stop_tasks():
+                run = await self.runs.get(run_id)
+                return bool(not run or run.lease_owner != owner or (run.cancellation_requested or run.status in {"pausing", "cancelled"}
+                    or json.loads(run.config_snapshot_json or "{}").get("pause_requested")))
+
+            if hasattr(driver, "task_checkpoint"):
+                driver.task_checkpoint = task_boundary
+                driver.task_stop_requested = should_stop_tasks
             # A checkpoint and its relational side effects are normally written
             # in order, but a process can stop between those commits. Replaying
             # these idempotent persistence steps reconstructs missing rows from
@@ -197,6 +218,9 @@ class HarnessRuntime:
                     await self._persist_execution(context, driver, budget)
                     context.workflow_state = driver.snapshot()
                     context.budget_usage = budget.usage
+                    if await self._pause_at_safe_boundary(context):
+                        return context
+                    context.resume_cursor = None
                     persisted_evidence = await self.evidence_repository.list_for_run(run_id)
                     minimum_evidence = int(context.config_snapshot.get("min_evidence", 1))
                     if len(persisted_evidence) < minimum_evidence:
@@ -419,6 +443,8 @@ class HarnessRuntime:
                         await self._transition(context, RunStatus.FAILED, event_type="run.failed", error_message=f"Completion Contract 未通过: {', '.join(verdict.failures)}")
 
             return context
+        except LostExecutionLease:
+            return context
         except (RunCancelled, asyncio.CancelledError):
             assert context is not None
             if context.status is not RunStatus.CANCELLING:
@@ -451,7 +477,7 @@ class HarnessRuntime:
         if restored is not None:
             persisted_status = None if run.status == "pausing" else RunStatus(run.status)
             if persisted_status is RunStatus.INTERRUPTED:
-                restored.resume_from_status = self._safe_stage_after(restored.status)
+                restored.resume_from_status = restored.resume_cursor or restored.resume_from_status or self._safe_stage_after(restored.status)
                 restored.status = RunStatus.INTERRUPTED
             elif persisted_status is RunStatus.PAUSED:
                 restored.status = RunStatus.PAUSED
@@ -543,6 +569,8 @@ class HarnessRuntime:
         try:
             while not task.done():
                 await asyncio.wait({task}, timeout=1.0)
+                if not await self.runs.renew_lease(context.run_id, context.execution_owner, ttl_seconds=self.lease_seconds):
+                    raise LostExecutionLease("当前执行任务已失去租约")
                 self._attach_prefix_usage(context)
                 context.budget_usage = budget.usage
                 budget.assert_available()
@@ -578,12 +606,7 @@ class HarnessRuntime:
         }
         published_evidence_ids = {item.evidence_id for item in await self.evidence_repository.list_for_run(context.run_id)}
         records = driver.execution_records()
-        reported_tokens = sum(
-            self._token_usage_total(record.metadata.token_usage)
-            for record in records
-        )
-        if reported_tokens:
-            budget.observe_tokens(reported_tokens)
+        self._record_execution_usage(context, driver, budget)
         for record in records:
             if record.task_id not in live_task_ids:
                 await self.events.publish(context.run_id, "task.completed", stage="executing", payload={"task_id": record.task_id, "evidence_count": len(record.evidence)})
@@ -592,7 +615,7 @@ class HarnessRuntime:
                     continue
                 seen_calls.add(call.tool_call_id)
                 existing = await self.trajectory.get_tool_call(call.tool_call_id) if self.trajectory else None
-                if existing is not None and existing.status == "completed":
+                if existing is not None and existing.status in {"completed", "failed"}:
                     continue
                 budget.consume_tool(tavily=call.source_mode == "web")
                 if self.trajectory:
@@ -615,6 +638,13 @@ class HarnessRuntime:
                     continue
                 published_evidence_ids.add(item.evidence_id)
                 await self.events.publish(context.run_id, "evidence.added", stage="executing", payload={"task_id": task_id, "evidence_id": item.evidence_id, "source_mode": item.source_mode.value})
+
+    @staticmethod
+    def _record_execution_usage(context, driver, budget):
+        for record in driver.execution_records():
+            context.charged_record_tokens.setdefault(record.record_id,
+                HarnessRuntime._token_usage_total(record.metadata.token_usage))
+        budget.observe_tokens(sum(context.charged_record_tokens.values()))
 
     @staticmethod
     def _token_usage_total(usage: dict[str, Any] | None) -> int:

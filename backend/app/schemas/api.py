@@ -31,6 +31,8 @@ class SessionPatch(ApiModel):
 
 
 class MessageSend(ApiModel):
+    target_run_id: str | None = None
+    new_run: bool = False
     client_message_id: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=20000)
     source_mode: SourceMode
@@ -43,6 +45,7 @@ class ClarificationSubmit(ApiModel):
 
 
 class RunAccepted(ApiModel):
+    command_id: str | None = None
     message_id: str
     run_id: str
     status: str

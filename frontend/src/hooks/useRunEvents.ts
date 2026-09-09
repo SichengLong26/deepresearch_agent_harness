@@ -32,10 +32,16 @@ export function useRunEvents(runId?: string | null) {
       if (closed) return;
       source = new EventSource(`${API_BASE}/runs/${runId}/events?after_event_id=${cursor.current}`);
       source.onopen = () => setConnection("connected");
+      source.addEventListener("plan.revision_applied", (message) => {
+        const data = JSON.parse((message as MessageEvent).data) as RunEvent;
+        if (typeof data.event_id === "number") cursor.current = Math.max(cursor.current, data.event_id);
+        setEvents(items => typeof data.event_id === "number" && items.some(item => item.event_id === data.event_id) ? items : [...items, data]);
+        sync();
+      });
       const handle = (message: MessageEvent) => {
         const data = JSON.parse(message.data) as RunEvent;
         if (typeof data.event_id === "number") cursor.current = Math.max(cursor.current, data.event_id);
-        setEvents((items) => items.some((item) => item.event_id === data.event_id) ? items : [...items, data]);
+        setEvents((items) => typeof data.event_id === "number" && items.some((item) => item.event_id === data.event_id) ? items : [...items, data]);
         if (String(data.event_type).startsWith("run.")) sync();
       };
       ["run.queued", "run.started", "run.stage_changed", "run.pause_requested", "run.paused", "run.resumed", "run.completed", "run.failed", "run.cancelled", "run.budget_exhausted", "run.needs_user_input", "plan.created", "plan.revised", "task.started", "task.completed", "task.failed", "tool.completed", "tool.failed", "evidence.added", "report.completed", "verification.completed", "agent.progress", "iteration.completed"].forEach((name) => source?.addEventListener(name, handle));

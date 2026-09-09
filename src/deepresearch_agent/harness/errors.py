@@ -38,3 +38,7 @@ class AppError(RuntimeError):
 
 class RunCancelled(RuntimeError):
     """Internal cooperative-cancellation signal; never exposed as a failure."""
+
+
+class LostExecutionLease(RuntimeError):
+    """An old worker must stop without changing the new owner's durable state."""

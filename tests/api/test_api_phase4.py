@@ -277,6 +277,31 @@ def test_resume_intent_rejects_cancel_or_changed_task_language():
     assert not is_resume_intent("改为另一个主题继续研究")
 
 
+def test_paused_chat_cancel_cancels_same_run_instead_of_creating_research(client):
+    client.app.state.run_service.schedule = lambda _run_id: None
+    session_id = new_session(client)
+
+    async def create_paused():
+        message, run, _ = await RunRepository(client.app.state.database).create_for_user_message(
+            MessageCreate(session_id=session_id, role="user", content="研究", client_message_id="cancel-original"),
+            RunCreate(session_id=session_id, trigger_message_id="atomic", source_mode=SourceMode.WEB,
+                workflow_mode=WorkflowMode.PLAN_EXECUTE_REPORT, config_snapshot={}, budget={}),
+        )
+        await RunRepository(client.app.state.database).update_status(
+            run.run_id, status="paused", current_stage="executing", usage={})
+        return run.run_id
+
+    run_id = client.portal.call(create_paused)
+    response = client.post(f"/api/v1/sessions/{session_id}/messages", json={
+        "client_message_id": str(uuid.uuid4()), "content": "取消这个任务",
+        "source_mode": "web", "workflow_mode": "plan_execute_report",
+    })
+    assert response.status_code == 202
+    assert response.json()["run_id"] == run_id
+    assert response.json()["created"] is False
+    assert client.get(f"/api/v1/runs/{run_id}").json()["status"] == "cancelled"
+
+
 def test_clarification_resumes_same_run(client):
     client.app.state.run_service.schedule = lambda _run_id: None
     session_id = new_session(client)

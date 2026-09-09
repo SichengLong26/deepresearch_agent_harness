@@ -79,7 +79,7 @@ function parseIterations(events: RunEvent[]): IterationEntry[] {
 function parsePlanTasks(events: RunEvent[]): PlanTask[] {
   let tasks: PlanTask[] = [];
   events
-    .filter((event) => event.event_type === "plan.created" || event.event_type === "plan.revised")
+    .filter((event) => event.event_type === "plan.created" || event.event_type === "plan.revised" || event.event_type === "plan.revision_applied")
     .forEach((event) => {
       if (Array.isArray(event.tasks)) {
         tasks = (event.tasks as PlanTask[]).map((task) => ({
@@ -117,7 +117,11 @@ export function deriveStageFeed(events: RunEvent[], report?: Report | null): Sta
   const iterations = parseIterations(events);
   const planTasks = parsePlanTasks(events);
   const currentPlanTaskIds = new Set(planTasks.map((task) => task.task_id));
-  const isCurrentPlanTask = (event: RunEvent) => currentPlanTaskIds.size === 0 || currentPlanTaskIds.has(stringOr(event.task_id));
+  const revisionEvent = [...events].reverse().find(event => event.event_type === "plan.revision_applied");
+  const reused = Array.isArray(revisionEvent?.reused) ? revisionEvent.reused.map(String) : [];
+  const revisionEventId = numberOr(revisionEvent?.event_id, Number.MAX_SAFE_INTEGER);
+  const isCurrentPlanTask = (event: RunEvent) => (currentPlanTaskIds.size === 0 || currentPlanTaskIds.has(stringOr(event.task_id)))
+    && (!revisionEvent || numberOr(event.event_id, -1) > revisionEventId || reused.includes(stringOr(event.task_id)));
   // 完成态：含 answer 事件自己的 index（其值为已完成轮数，会多出一位）
   const completedIndexes = new Set(
     events.filter((event) => event.event_type === "iteration.completed").map((event) => numberOr(event.iteration_index))

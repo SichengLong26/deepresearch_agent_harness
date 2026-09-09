@@ -15,7 +15,7 @@ def is_resume_intent(content: str) -> bool:
         return False
     if any(marker in normalized for marker in ("不要", "别继续", "别恢复", "取消", "停止", "重来", "重新规划")):
         return False
-    if any(marker in normalized for marker in ("改为", "换成", "另一个", "新任务", "新增", "补充要求")):
+    if any(marker in normalized for marker in ("改", "跳过", "不执行", "换", "另一个", "新任务", "新增", "补充要求", "先", "不要", "skip")):
         return False
     direct = ("继续", "接着", "恢复", "续上", "往下", "下一步", "开始吧", "resume", "continue", "goon", "proceed")
     if any(marker in normalized for marker in direct):
@@ -49,7 +49,37 @@ class ChatService:
                     created=False,
                 )
 
-        paused = await self.runs.latest_paused_for_session(session_id)
+        paused = None if request.new_run else await self.runs.latest_paused_for_session(session_id)
+        if request.target_run_id and not request.new_run:
+            paused = await self.runs.get(request.target_run_id)
+            if paused is None or paused.session_id != session_id:
+                raise AppError(ErrorCode.NOT_FOUND, "目标 Run 不属于当前会话")
+            if paused.status not in {"paused", "pausing"}:
+                raise AppError(ErrorCode.CONFLICT, "目标 Run 当前不可修改")
+        normalized_control = request.content.strip().rstrip("。！!")
+        if paused is not None and normalized_control in {"取消", "取消任务", "取消这个任务", "取消研究"}:
+            message, _ = await self.messages.append(MessageCreate(
+                session_id=session_id, run_id=paused.run_id, role="user", content=request.content,
+                client_message_id=request.client_message_id,
+                metadata={"control": "cancel", "cancel_run_id": paused.run_id},
+            ))
+            cancelled = await self.run_service.cancel(paused.run_id)
+            current = await self.runs.get(paused.run_id)
+            if not cancelled and (current is None or current.status not in {"cancelling", "cancelled"}):
+                raise AppError(ErrorCode.CONFLICT, "暂停的 Run 当前不能取消")
+            return RunAccepted(
+                message_id=message.message_id, run_id=paused.run_id,
+                status=current.status if current else "cancelling",
+                events_url=f"/api/v1/runs/{paused.run_id}/events", created=False,
+            )
+        if paused is not None and not is_resume_intent(request.content):
+            command = await self.run_service.commands.submit_text(paused.run_id, request.client_message_id, request.content)
+            message, _ = await self.messages.append(MessageCreate(
+                session_id=session_id, run_id=paused.run_id, role="user", content=request.content,
+                client_message_id=request.client_message_id, metadata={"command_id": command["request_id"]},
+            ))
+            return RunAccepted(message_id=message.message_id, run_id=paused.run_id, status=paused.status,
+                events_url=f"/api/v1/runs/{paused.run_id}/events", created=False, command_id=command["request_id"])
         if paused is not None and is_resume_intent(request.content):
             message, _ = await self.messages.append(MessageCreate(
                 session_id=session_id, run_id=paused.run_id, role="user",

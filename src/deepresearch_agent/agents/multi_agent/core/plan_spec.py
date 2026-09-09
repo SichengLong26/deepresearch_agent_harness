@@ -114,7 +114,8 @@ class TaskNode(BaseModel):
     )
 
     # 状态
-    status: Literal["pending", "running", "completed", "failed"] = Field(
+    task_revision: int = Field(default=1, ge=1)
+    status: Literal["pending", "running", "completed", "failed", "skipped", "blocked"] = Field(
         default="pending",
         description="任务执行状态"
     )

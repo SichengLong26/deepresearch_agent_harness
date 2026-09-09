@@ -114,6 +114,8 @@ class PlanExecuteReportDriver:
         self.planner_result: PlannerResult | None = None
         self.report_result: ReportResult | None = None
         self._repair_pending = False
+        self.task_checkpoint = None
+        self.task_stop_requested = None
         self._restore(context.workflow_state)
 
     def _restore(self, payload: dict[str, Any]) -> None:
@@ -130,6 +132,9 @@ class PlanExecuteReportDriver:
             ]
         if payload.get("planner_result"):
             self.planner_result = PlannerResult.model_validate(payload["planner_result"])
+            if self.state.plan is not None:
+                self.planner_result.plan_spec = self.state.plan
+                self.planner_result.executor_signal = self.state.plan.to_execution_signal()
         if payload.get("report_result"):
             self.report_result = ReportResult.model_validate(payload["report_result"])
         self._repair_pending = bool(payload.get("repair_pending"))
@@ -146,6 +151,9 @@ class PlanExecuteReportDriver:
     async def execute(self) -> None:
         if self.planner_result is None:
             raise RuntimeError("缺少 PlannerResult")
+        if self.state.plan is not None:
+            self.planner_result.plan_spec = self.state.plan
+            self.planner_result.executor_signal = self.state.plan.to_execution_signal()
         execution_token_ceiling = max(
             0,
             self.context.budget_limits.max_llm_tokens
@@ -155,6 +163,8 @@ class PlanExecuteReportDriver:
         loop = asyncio.get_running_loop()
 
         def progress_callback(kind, task, record):
+            if record is not None and self.task_checkpoint is not None:
+                asyncio.run_coroutine_threadsafe(self.task_checkpoint(), loop).result(timeout=30)
             if self.events is None:
                 return
             future = asyncio.run_coroutine_threadsafe(
@@ -162,13 +172,17 @@ class PlanExecuteReportDriver:
             )
             future.result(timeout=10)
 
+        def stop_requested():
+            return self.context.budget_usage.llm_tokens >= execution_token_ceiling or (
+                self.task_stop_requested is not None and
+                asyncio.run_coroutine_threadsafe(self.task_stop_requested(), loop).result(timeout=30)
+            )
+
         records = await asyncio.to_thread(
             self.orchestrator.execute,
             self.state,
             self.planner_result,
-            stop_predicate=lambda: (
-                self.context.budget_usage.llm_tokens >= execution_token_ceiling
-            ),
+            stop_predicate=stop_requested,
             progress_callback=progress_callback,
         )
         existing = {item.record_id for item in self.state.execution_records}
@@ -223,9 +237,17 @@ class PlanExecuteReportDriver:
         )
 
     async def report(self) -> str:
+        requirements = self.context.config_snapshot.get("report_requirements")
+        exclusions = self.context.config_snapshot.get("scope_exclusions")
+        if requirements or exclusions:
+            base_input = self.context.resolved_query or self.context.original_query
+            self.state.input = base_input + "\n用户修订后的报告要求：" + json.dumps(requirements or {}, ensure_ascii=False)
+            if exclusions:
+                self.state.input += "\n用户明确排除以下范围，不应再次研究或将缺少它们视为失败：" + json.dumps(exclusions, ensure_ascii=False)
+            self.state.context_snapshot["report_revision_instructions"] = self.state.input
         if self._repair_pending and self.report_result is not None:
             self._repair_pending = False
-        elif self._uses_compact_report():
+        elif self._uses_compact_report() and not requirements:
             self.report_result = self._build_compact_report()
         elif self._requires_reserved_budget_fallback():
             self.report_result = self._build_reserved_budget_report()

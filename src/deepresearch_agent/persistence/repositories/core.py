@@ -241,6 +241,15 @@ class RunRepository:
                 # the externally visible control state while still advancing
                 # current_stage to the safe continuation point.
                 values["status"] = "pausing"
+            if status not in {"paused", "pausing"}:
+                from deepresearch_agent.persistence.models import RunEditModel
+                commands = (await session.execute(select(RunEditModel).where(
+                    RunEditModel.run_id == run_id, RunEditModel.status == "applied"))).scalars()
+                for command in commands:
+                    payload = json.loads(command.result_json)
+                    if payload.get("resume_pending"):
+                        payload["resume_pending"] = False
+                        command.result_json = json_text(payload)
             result = await session.execute(update(RunModel).where(RunModel.run_id == run_id).values(**values))
             return result.rowcount == 1
 
@@ -416,6 +425,13 @@ class RunRepository:
         expires = (now + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
         async with self.database.transaction() as session:
             result = await session.execute(update(RunModel).where(RunModel.run_id == run_id, or_(RunModel.lease_owner.is_(None), RunModel.lease_expires_at < now_text, RunModel.lease_owner == owner)).values(lease_owner=owner, lease_expires_at=expires, updated_at=now_text))
+            return result.rowcount == 1
+
+    async def renew_lease(self, run_id: str, owner: str, *, ttl_seconds: int = 60) -> bool:
+        expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
+        async with self.database.transaction() as session:
+            result = await session.execute(update(RunModel).where(RunModel.run_id == run_id,
+                RunModel.lease_owner == owner).values(lease_expires_at=expires))
             return result.rowcount == 1
 
     async def release_lease(self, run_id: str, owner: str) -> bool:
