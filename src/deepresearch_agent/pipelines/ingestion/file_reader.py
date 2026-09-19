@@ -6,7 +6,7 @@ from docx import Document
 import csv
 import json
 import yaml
-from yaml import CLoader as Loader
+from yaml import CSafeLoader as Loader
 
 from deepresearch_agent.config.settings import FILES_DIR
 
