@@ -181,7 +181,11 @@ class VectorSimilarityMatcher:
                 print(f"保存向量索引失败: {e}")
     
     def _load_index(self):
-        """从文件加载索引"""
+        """从文件加载索引
+
+        Note: pickle.load 用于加载本项目自身写入的本地缓存文件
+        (key_to_index/index_to_key 等映射)，不处理外部不可信输入。
+        """
         try:
             # 加载映射关系
             with open(f"{self.index_file}.pkl", 'rb') as f:
