@@ -456,3 +456,15 @@ python scripts/evaluate_runs.py --labels evals/system/cases.json --retrieval-k 1
 - **Bounded context**：每个阶段都有明确上下文和预算边界；
 - **Controlled evolution**：经验可以演进，但必须经过评测和人工门禁；
 - **Honest failure**：证据、预算或权限不足时明确失败，不伪造成功。
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=SichengLong26%2Fdeepresearch_agent_harness&amp;type=date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=SichengLong26/deepresearch_agent_harness&amp;type=date&amp;theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=SichengLong26/deepresearch_agent_harness&amp;type=date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=SichengLong26/deepresearch_agent_harness&amp;type=date" />
+  </picture>
+</a>
