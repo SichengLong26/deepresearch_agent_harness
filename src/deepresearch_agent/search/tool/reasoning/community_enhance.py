@@ -126,7 +126,7 @@ class CommunityAwareSearchEnhancer:
                     if isinstance(importance, str):
                         try:
                             importance = float(importance)
-                        except:
+                        except Exception:
                             importance = 1.0
                     
                     # 归一化重要性

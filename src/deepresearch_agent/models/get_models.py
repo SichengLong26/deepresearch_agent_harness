@@ -109,7 +109,7 @@ def count_tokens(text):
             from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3")
             return len(tokenizer.encode(text))
-        except:
+        except Exception:
             pass
     
     # 如果是gpt，使用tiktoken
@@ -118,7 +118,7 @@ def count_tokens(text):
             import tiktoken
             encoding = tiktoken.get_encoding("cl100k_base")
             return len(encoding.encode(text))
-        except:
+        except Exception:
             pass
     
     # 备用方案：简单计算

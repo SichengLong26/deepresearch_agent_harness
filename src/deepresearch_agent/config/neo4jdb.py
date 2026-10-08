@@ -106,7 +106,7 @@ class DBConnectionManager:
         for session in self.session_pool:
             try:
                 session.close()
-            except:
+            except Exception:
                 pass
         
         # 清空池

@@ -321,7 +321,7 @@ class EvidenceChainTracker:
             clean_value = re.sub(r'[^\d.,]', '', value_str).replace(',', '.')
             try:
                 value = float(clean_value)
-            except:
+            except Exception:
                 continue
             
             # 获取上下文（数值前后20个字符）

@@ -15,7 +15,7 @@ def num_tokens_from_string(text: str) -> int:
     try:
         from deepresearch_agent.models.get_models import count_tokens
         return count_tokens(text)
-    except:
+    except Exception:
         # 简单备用
         return len(text) // 4
 

@@ -177,7 +177,7 @@ class FileReader:
                         import chardet
                         result = chardet.detect(raw_data)
                         encoding = result['encoding'] if result['encoding'] else 'gbk'
-                    except:
+                    except Exception:
                         encoding = 'gbk'  # 如果chardet不可用，默认使用gbk
                         
                 with codecs.open(file_path, 'r', encoding=encoding, errors='replace') as file:
@@ -317,7 +317,7 @@ class FileReader:
                         raw_data = f.read(10240)
                         result = chardet.detect(raw_data)
                         encoding = result['encoding'] if result['encoding'] else 'gbk'
-                    except:
+                    except Exception:
                         encoding = 'gbk'  # 如果chardet不可用，默认使用gbk
                         
                 text = []

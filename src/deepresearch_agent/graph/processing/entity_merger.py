@@ -126,9 +126,9 @@ class EntityMerger:
                                     else:
                                         entity_lists = [parsed_list]
                                     break
-                            except:
+                            except Exception:
                                 pass  # 如果解析失败，继续使用正则方法
-        except:
+        except Exception:
             pass  # 如果上述方法失败，回退到正则表达式方法
         
         # 如果直接解析失败，使用正则表达式方法

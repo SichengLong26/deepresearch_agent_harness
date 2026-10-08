@@ -122,7 +122,7 @@ class ManualEditManager:
             try:
                 db_info = self.graph.query("CALL db.info()")
                 db_name = db_info[0]["name"] if db_info and "name" in db_info[0] else "neo4j"
-            except:
+            except Exception:
                 db_name = "neo4j"  # 默认数据库名称
                 
             # 添加时间戳触发器追踪节点和关系的创建/修改时间
@@ -241,7 +241,7 @@ class ManualEditManager:
                 try:
                     timestamp_result = self.graph.query(timestamp_query)
                     timestamp_entities = timestamp_result[0]["timestamp_entities"] if timestamp_result else 0
-                except:
+                except Exception:
                     timestamp_entities = 0
             
         except Exception as e:

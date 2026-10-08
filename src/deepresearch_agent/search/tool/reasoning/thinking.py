@@ -216,7 +216,7 @@ class ThinkingEngine:
                 return "rejected"
             else:
                 return "uncertain"
-        except:
+        except Exception:
             # 默认不确定
             return "uncertain"
     

@@ -144,7 +144,7 @@ class EntityAligner:
             valid_ids = [e['entity_id'] for e in entities]
             if selected in valid_ids:
                 return selected
-        except:
+        except Exception:
             pass
         
         # 回退: 选择关系数最多的
